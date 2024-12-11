@@ -19,6 +19,7 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.util.List;
+import java.util.stream.Collectors;
 
 @Service
 @RequiredArgsConstructor
@@ -78,7 +79,7 @@ public class ProductServiceImpl implements ProductService{
                         .productName(dto.productName())
                         .description(dto.description())
                         .build())
-                .toList() ;
+                .collect(Collectors.toList()) ;
 
         List<Product> savedProductList = productRepository.saveAll(productList) ;
 
