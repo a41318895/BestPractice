@@ -7,6 +7,7 @@ import com.akichou.mysqlwithjpa.exception.ProductNotFoundException;
 import com.akichou.mysqlwithjpa.entity.Product;
 import com.akichou.mysqlwithjpa.entity.vo.ProductVo;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.cache.annotation.CacheConfig;
 import org.springframework.cache.annotation.CacheEvict;
 import org.springframework.cache.annotation.CachePut;
@@ -16,6 +17,8 @@ import org.springframework.data.domain.PageRequest;
 import org.springframework.data.domain.Pageable;
 import org.springframework.http.ResponseEntity;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Isolation;
+import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.util.List;
@@ -24,6 +27,7 @@ import java.util.stream.Collectors;
 @Service
 @RequiredArgsConstructor
 @CacheConfig(cacheNames = "products")
+@Slf4j
 public class ProductServiceImpl implements ProductService{
 
     private final ProductRepository productRepository ;
@@ -31,6 +35,7 @@ public class ProductServiceImpl implements ProductService{
 
     @Override
     @Cacheable(key = "#productId")
+    @Transactional(readOnly = true, isolation = Isolation.READ_COMMITTED)
     public ResponseEntity<ProductVo> getProductById(Long productId) {
 
         Product product = fetchProduct(productId) ;
@@ -39,59 +44,82 @@ public class ProductServiceImpl implements ProductService{
     }
 
     @Override
-    @Transactional(rollbackFor = Exception.class)
+    @CachePut(key = "#result.body.id()")
+    @Transactional(rollbackFor = Exception.class, isolation = Isolation.READ_COMMITTED)
     public ResponseEntity<ProductVo> addProduct(ProductDto productDto) {
 
-        Product product = Product.builder()
-                .productName(productDto.productName())
-                .description(productDto.description())
-                .build() ;
+        try {
+            Product product = Product.builder()
+                    .productName(productDto.productName())
+                    .description(productDto.description())
+                    .build();
 
-        Product savedProduct = productRepository.save(product) ;
+            Product savedProduct = productRepository.save(product);
 
-        consistencyComponent.ensureConsistency(savedProduct) ;
+            return ResponseEntity.ok(mapProductToProductVo(savedProduct));
+        } catch (Exception e) {
 
-        return ResponseEntity.ok(mapProductToProductVo(savedProduct)) ;
+            log.error("Error occurred while adding product: {}", e.getMessage());
+
+            throw e ;
+        }
     }
 
     @Override
-    @Transactional(rollbackFor = Exception.class)
-    @CachePut(key = "#result.body.id()")
+    @CacheEvict(key = "#result.body.id()")
+    @Transactional(rollbackFor = Exception.class, isolation = Isolation.READ_COMMITTED)
     public ResponseEntity<ProductVo> updateProduct(ProductUpdateDto productUpdateDto) {
 
-        Product product = fetchProduct(productUpdateDto.id()) ;
+        try {
+            Product product = fetchProduct(productUpdateDto.id());
 
-        product.setProductName(productUpdateDto.productName()) ;
-        product.setDescription(productUpdateDto.description()) ;
-        Product savedProduct = productRepository.save(product) ;
+            product.setProductName(productUpdateDto.productName());
+            product.setDescription(productUpdateDto.description());
+            Product savedProduct = productRepository.save(product);
 
-        consistencyComponent.ensureConsistency(savedProduct) ;
+            return ResponseEntity.ok(mapProductToProductVo(savedProduct));
+        } catch (Exception e) {
 
-        return ResponseEntity.ok(mapProductToProductVo(savedProduct)) ;
+            log.error("Error occurred while updating product: {}", e.getMessage());
+
+            throw e ;
+        }
     }
 
     @Override
-    @Transactional(rollbackFor = Exception.class)
+    @CachePut(key = "#result.body.?[true].id()")
+    @Transactional(rollbackFor = Exception.class,
+                   isolation = Isolation.READ_COMMITTED,
+                   propagation = Propagation.REQUIRES_NEW)
     public ResponseEntity<List<ProductVo>> addProducts(List<ProductDto> productDtoList) {
 
-        List<Product> productList = productDtoList.stream()
-                .map(dto -> Product.builder()
-                        .productName(dto.productName())
-                        .description(dto.description())
-                        .build())
-                .collect(Collectors.toList()) ;
+        try {
+            List<Product> productList = productDtoList.stream()
+                    .map(dto -> Product.builder()
+                            .productName(dto.productName())
+                            .description(dto.description())
+                            .build())
+                    .collect(Collectors.toList());
 
-        List<Product> savedProductList = productRepository.saveAll(productList) ;
+            List<Product> savedProductList = productRepository.saveAll(productList);
 
-        consistencyComponent.ensureConsistency(savedProductList) ;
+            // Avoid OOM
+            consistencyComponent.ensureConsistency(savedProductList);
 
-        return ResponseEntity.ok(savedProductList.stream()
+            return ResponseEntity.ok(savedProductList.stream()
                     .map(this::mapProductToProductVo)
-                    .toList()) ;
+                    .toList());
+        } catch (Exception e) {
+
+            log.error("Error occurred while adding products: {}", e.getMessage());
+
+            throw e ;
+        }
     }
 
     @Override
-    @Cacheable(key = "#productKeywordDto.keyword() + ':' + #productKeywordDto.page() + ':' + #productKeywordDto.size()")
+    @Cacheable(key = "#result.body.?[true].id()")
+    @Transactional(readOnly = true, isolation = Isolation.READ_COMMITTED)
     public ResponseEntity<List<ProductVo>> getProductByKeyword(ProductKeywordDto productKeywordDto) {
 
         Pageable pageable =
@@ -105,7 +133,8 @@ public class ProductServiceImpl implements ProductService{
     }
 
     @Override
-    @Cacheable(key = "#productExactNameDto.productName() + ':' + #productExactNameDto.page() + ':' + #productExactNameDto.size()")
+    @Cacheable(key = "#result.body.?[true].id()")
+    @Transactional(readOnly = true, isolation = Isolation.READ_COMMITTED)
     public ResponseEntity<List<ProductVo>> getProductsByExactName(ProductExactNameDto productExactNameDto) {
 
         Pageable pageable =
@@ -119,33 +148,48 @@ public class ProductServiceImpl implements ProductService{
     }
 
     @Override
-    @Transactional(rollbackFor = Exception.class)
     @CacheEvict(key = "#result.body.id()")
+    @Transactional(rollbackFor = Exception.class, isolation = Isolation.READ_COMMITTED)
     public ResponseEntity<ProductVo> deleteProduct(Long productId) {
 
-        Product product = fetchProduct(productId) ;
+        try {
+            Product product = fetchProduct(productId);
 
-        productRepository.delete(product) ;
+            productRepository.delete(product);
 
-        consistencyComponent.ensureConsistencyNoMerge(product) ;
+            return ResponseEntity.ok(mapProductToProductVo(product));
+        } catch (Exception e) {
 
-        return ResponseEntity.ok(mapProductToProductVo(product)) ;
+            log.error("Error occurred while deleting product: {}", e.getMessage());
+
+            throw e ;
+        }
     }
 
     @Override
-    @Transactional(rollbackFor = Exception.class)
     @CacheEvict(allEntries = true)
+    @Transactional(rollbackFor = Exception.class,
+                   isolation = Isolation.READ_COMMITTED,
+                   propagation = Propagation.REQUIRES_NEW)
     public ResponseEntity<List<ProductVo>> deleteProducts(ProductDeleteDto productDeleteDto) {
 
-        List<Product> products = productRepository.findAllById(productDeleteDto.productIds()) ;
+        try {
+            List<Product> products = productRepository.findAllById(productDeleteDto.productIds());
 
-        productRepository.deleteAll(products) ;
+            productRepository.deleteAll(products);
 
-        consistencyComponent.ensureConsistencyNoMerge(products) ;
+            // Avoid OOM
+            consistencyComponent.ensureConsistency(products);
 
-        return ResponseEntity.ok(products.stream()
-                .map(this::mapProductToProductVo)
-                .toList()) ;
+            return ResponseEntity.ok(products.stream()
+                    .map(this::mapProductToProductVo)
+                    .toList());
+        } catch (Exception e) {
+
+            log.error("Error occurred while deleting products: {}", e.getMessage());
+
+            throw e ;
+        }
     }
 
     private ProductVo mapProductToProductVo(Product product) {
